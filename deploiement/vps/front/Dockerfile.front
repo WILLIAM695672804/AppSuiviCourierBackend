@@ -1,0 +1,19 @@
+# ---------------------------------------------------------------------
+#  Le front, deja bati. Aucune etape Node.
+#
+#  Le `dist` de Vite est un ensemble de fichiers statiques : il ne depend
+#  ni du processeur ni du systeme. Le batir sur le poste de travail, ou la
+#  memoire est abondante, puis ne transferer que le resultat, evite un
+#  `npm ci` de 400 Mo et un `vite build` de 1,5 Gio sur un VPS a 2 vCore
+#  dont la moitie de la memoire est deja prise.
+#
+#  Conséquence a connaitre : ce qui part en ligne est le bundle construit
+#  sur le poste. `2-preparer-paquet.sh` le reconstruit a chaque fois pour
+#  cette raison — sinon on publie un `dist` oublie de la semaine passee.
+# ---------------------------------------------------------------------
+FROM nginx:1.27-alpine
+
+COPY dist /usr/share/nginx/html
+COPY nginx.conf /etc/nginx/conf.d/default.conf
+
+EXPOSE 80

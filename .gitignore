@@ -1,0 +1,45 @@
+# ---------------------------------------------------------------------
+#  Le depot est PUBLIC. Tout ce qui est ci-dessous y causerait une fuite,
+#  et une fuite poussee reste dans l'historique meme apres suppression.
+#
+#  `.env` seul ne suffisait pas : Git ne fait aucune correspondance par
+#  prefixe, et `.env.preprod` — qui porte la cle de signature des
+#  sessions, le mot de passe de la base et le jeton du tunnel — n'etait
+#  pas couvert.
+# ---------------------------------------------------------------------
+.env
+.env.*
+!.env.example
+!.env.*.example
+
+# Materiel cryptographique. Deux fichiers de ce type tramaient dans ce
+# repertoire depuis un `tailscale cert` du 8 septembre, dont une cle
+# privee appartenant a root.
+*.key
+*.crt
+*.pem
+*.p12
+*.pfx
+
+# Sauvegardes et exports : ils portent les donnees reelles du Port.
+*.dump
+*.sql.gz
+*.tar.gz
+sauvegardes/
+
+# Produits par `deploiement/vps/3-installer.sh` sur le serveur.
+restauration.log
+obtenu.txt
+
+.venv/
+__pycache__/
+*.py[cod]
+media/
+static/
+staticfiles/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+htmlcov/
+.coverage
+openapi.json

@@ -1,0 +1,16 @@
+# Le declencheur. `Persistent=true` est la seule raison d'avoir quitte `cron`.
+#
+# Un poste de travail est eteint la nuit : la tache de 23h30 ne se declenchait
+# pas, et rien ne la rattrapait. Vingt sauvegardes pour trente-quatre jours.
+# `Persistent=true` retient la date du dernier declenchement et rejoue
+# l'execution manquee au demarrage suivant.
+[Unit]
+Description=Declenche la sauvegarde quotidienne de la preproduction
+
+[Timer]
+OnCalendar=23:30
+Persistent=true
+AccuracySec=1min
+
+[Install]
+WantedBy=timers.target

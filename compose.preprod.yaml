@@ -1,0 +1,214 @@
+# ---------------------------------------------------------------------
+#  Preproduction — recette du Port sur donnees reelles (ADR 044).
+#
+#  Sept services sur un poste de travail. A ne pas confondre avec
+#  `compose.yaml`, qui ne monte que les dependances du developpement.
+#
+#      docker compose -f compose.preprod.yaml up -d
+#
+#  Le nom de projet est porte par `name:` ci-dessous, et non plus laisse a
+#  un `-p` que l'on oublie une fois sur deux. Sans lui, Compose deduit le
+#  nom du repertoire — celui du developpement — et les deux environnements
+#  se partagent les memes volumes. Pire : une commande avec `-p` et une
+#  autre sans pilotent deux projets differents sans le dire, si bien qu'on
+#  reconstruit ici ce qu'on redemarre la-bas.
+#
+#  Les ports publies le sont sur 127.0.0.1 uniquement. Rien de ce fichier
+#  n'ouvre quoi que ce soit sur le reseau local : l'exterieur passe par le
+#  tunnel, qui n'ouvre aucun port entrant.
+# ---------------------------------------------------------------------
+
+name: suivi-preprod
+
+x-application: &application
+  build:
+    context: .
+    dockerfile: Dockerfile
+  image: suivi/application:preprod
+  env_file: [.env.preprod]
+  environment:
+    DJANGO_SETTINGS_MODULE: config.reglages.preprod
+  volumes:
+    - pieces:/app/media
+  depends_on:
+    base: {condition: service_healthy}
+    file: {condition: service_started}
+  restart: unless-stopped
+
+services:
+  base:
+    # PostgreSQL 16 minimum. En dessous, le schema ne s'applique pas :
+    # partitionnement declaratif, exclusion GiST, TSVECTOR.
+    image: postgres:16
+    # PIEGE : ne PAS ecrire `${POSTGRES_PASSWORD}` ici. Compose resout les
+    # `${...}` depuis le shell et le fichier `.env` du repertoire — celui du
+    # developpement — et non depuis `env_file`. La preproduction demarrerait
+    # avec le mot de passe de developpement, sans un mot d'avertissement.
+    # `POSTGRES_DB`, `POSTGRES_USER` et `POSTGRES_PASSWORD` viennent donc du
+    # fichier lui-meme.
+    env_file: [.env.preprod]
+    # Pas de `LANG: fr_FR.utf8` : l'image officielle ne genere que
+    # `en_US.utf8` et `C.UTF-8`. Reclamer une locale absente fait echouer
+    # `initdb` au tout premier demarrage, sur un volume vide, avec un
+    # message qui parle de locale et non de configuration. `en_US.utf8`
+    # trie correctement les accents du francais — « Étude » se range bien
+    # avant « Zone ».
+    command:
+      - postgres
+      - -c
+      - shared_buffers=768MB
+      - -c
+      - work_mem=8MB
+      - -c
+      - max_connections=40
+      # La recette observe le comportement reel : une requete qui depasse
+      # une seconde doit laisser une trace, sinon la lenteur se raconte au
+      # lieu de se mesurer.
+      - -c
+      - log_min_duration_statement=1000
+    volumes:
+      - donnees:/var/lib/postgresql/data
+    ports: ["127.0.0.1:5433:5432"]
+    healthcheck:
+      # `$$` : la variable est lue dans le conteneur, pas interpolee par
+      # Compose au chargement du fichier.
+      test: ["CMD-SHELL", "pg_isready -U $${POSTGRES_USER}"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+    mem_limit: 1500m
+    restart: unless-stopped
+
+  file:
+    # Courtier des taches differees. `--save ""` : Redis ne persiste rien
+    # ici, une file perdue au redemarrage se reconstitue a la tache
+    # suivante, et la persistance couterait des ecritures disque continues.
+    image: redis:7-alpine
+    command: ["redis-server", "--save", "", "--appendonly", "no", "--maxmemory", "192mb", "--maxmemory-policy", "noeviction"]
+    mem_limit: 256m
+    restart: unless-stopped
+
+  web:
+    <<: *application
+    # `gthread` et non `sync` : le telechargement d'une piece jointe passe
+    # par `FileResponse` sur un ouvrier Gunicorn (aucun X-Accel-Redirect —
+    # les pieces ne sont jamais servies en direct, voir la conf Nginx). Sur
+    # un lien montant domestique, un PDF de 25 Mo immobiliserait un ouvrier
+    # entier pendant une minute : trois ouvriers, et le Port est bloque.
+    #
+    # 3 ouvriers x 4 fils = 12 connexions possibles, plus l'ouvrier Celery :
+    # sous les 40 de `max_connections`, avec `ATOMIC_REQUESTS` qui tient une
+    # connexion pour toute la duree de chaque requete.
+    command:
+      - sh
+      - -c
+      - |
+        python manage.py migrate --noinput &&
+        exec gunicorn config.wsgi:application \
+          --bind 0.0.0.0:8000 \
+          --workers 3 --threads 4 --worker-class gthread \
+          --timeout 120 --graceful-timeout 30 \
+          --access-logfile - --error-logfile -
+    mem_limit: 2g
+
+  ouvrier:
+    <<: *application
+    # Concurrence 2 : au-dela, deux conversions LibreOffice simultanees
+    # ajoutent 1 Go et le noyau tue le plus gros processus de la machine,
+    # qui est PostgreSQL.
+    command: ["celery", "-A", "config.celery", "worker", "--loglevel=INFO", "--concurrency=2"]
+    mem_limit: 1500m
+    healthcheck:
+      test: ["CMD-SHELL", "celery -A config.celery inspect ping -d celery@$$HOSTNAME || exit 1"]
+      interval: 60s
+      timeout: 15s
+      retries: 3
+      start_period: 60s
+
+  horloge:
+    <<: *application
+    # LA PANNE MUETTE DU SYSTEME. Sans `beat`, les ecrans repondent, les
+    # saisies passent, et seul le temps cesse de s'ecouler : les etats ne se
+    # recalculent plus, les relances ne partent plus, et les partitions de
+    # l'annee suivante ne sont pas creees — toute ecriture metier echouera
+    # le 1er janvier. A surveiller pour lui-meme (runbook).
+    #
+    # `--schedule` sur un volume dedie, et non dans /app : beat memorise
+    # la derniere execution de chaque tache dans un fichier, et /app
+    # appartient a root alors que le conteneur tourne en `suivi`. Sans
+    # cela, « Permission denied: celerybeat-schedule », redemarrage en
+    # boucle — et la panne est MUETTE : les ecrans repondent, seul le
+    # temps cesse de s'ecouler.
+    #
+    # Un volume plutot que /tmp : ce fichier perdu, beat rejoue les
+    # taches du jour deja passees au prochain demarrage.
+    command:
+      - celery
+      - -A
+      - config.celery
+      - beat
+      - --loglevel=INFO
+      - --schedule=/etat/celerybeat-schedule
+    volumes:
+      - pieces:/app/media
+      - horloge:/etat
+    mem_limit: 256m
+
+  proxy:
+    build:
+      context: ../frontend
+      dockerfile: Dockerfile
+    image: suivi/front:preprod
+    depends_on: [web]
+    ports: ["127.0.0.1:8080:80"]
+    mem_limit: 128m
+    restart: unless-stopped
+
+  # -------------------------------------------------------------------
+  #  La publication n'est PAS un service de ce fichier.
+  #
+  #  Elle est assuree par Tailscale Funnel, installe sur l'hote et non en
+  #  conteneur (ADR 045) : Funnel a besoin de /dev/net/tun et de
+  #  NET_ADMIN, et un conteneur privilegie pour publier une recette est un
+  #  mauvais echange. `tailscale funnel 8080` suffit, et le service de
+  #  l'hote se releve au demarrage comme les conteneurs.
+  #
+  #  Le service ci-dessous est l'ancienne voie Cloudflare, conservee parce
+  #  qu'elle redeviendra la bonne le jour ou un vrai nom de domaine sera
+  #  disponible. Il ne demarre pas : son profil le retient.
+  #
+  #      docker compose ... --profile cloudflare up -d tunnel
+  # -------------------------------------------------------------------
+  tunnel:
+    profiles: ["cloudflare"]
+    image: cloudflare/cloudflared:latest
+    command: ["tunnel", "--no-autoupdate", "run"]
+    env_file: [.env.preprod]
+    depends_on: [proxy]
+    mem_limit: 128m
+    restart: unless-stopped
+
+  # -------------------------------------------------------------------
+  #  Repli gratuit et sans compte : le « quick tunnel » de Cloudflare.
+  #
+  #      docker compose -f compose.preprod.yaml --profile rapide up -d
+  #      docker compose -f compose.preprod.yaml logs tunnel-rapide | grep trycloudflare
+  #
+  #  Il publie une adresse `*.trycloudflare.com` immediate, sans domaine
+  #  ni carte bancaire. Sa limite est serieuse et il faut la dire aux
+  #  testeurs : **l'adresse change a chaque redemarrage du service**. Ce
+  #  n'est donc pas une solution d'exploitation, c'est un depannage — le
+  #  temps de debloquer Funnel, qui donne un nom stable.
+  # -------------------------------------------------------------------
+  tunnel-rapide:
+    profiles: ["rapide"]
+    image: cloudflare/cloudflared:latest
+    command: ["tunnel", "--no-autoupdate", "--url", "http://proxy:80"]
+    depends_on: [proxy]
+    mem_limit: 128m
+    restart: unless-stopped
+
+volumes:
+  donnees:
+  pieces:
+  horloge:

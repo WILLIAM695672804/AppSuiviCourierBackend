@@ -1,0 +1,22 @@
+# Sauvegarde quotidienne de la preproduction — unite utilisateur.
+#
+# Utilisateur et non systeme : le script ecrit dans le foyer de William et
+# parle a Docker par son appartenance au groupe `docker`. Une unite systeme
+# tournerait en root, et `sudo` deplace `HOME` — le piege deja rencontre
+# (docs/pieges.md, « sudo deplace HOME, donc les sauvegardes »).
+[Unit]
+Description=Sauvegarde de la base et des pieces de la preproduction
+# Sans Docker, le script echoue en deux secondes et noircit le journal.
+After=docker.service
+
+[Service]
+Type=oneshot
+# Les guillemets ne sont pas decoratifs : le chemin du projet porte un espace,
+# et sans eux systemd cherche un binaire « /home/.../application » — status
+# 203/EXEC, sans un mot sur la cause. Troisieme fois que ce chemin piêge le
+# projet (voir docs/pieges.md).
+ExecStart="/home/william/Documents/application de suivi/backend/deploiement/sauvegarder.sh"
+# Le journal du script reste la ou la crontab l'ecrivait : c'est le fichier
+# que `etat.sh` et l'habitude vont lire.
+StandardOutput=append:/home/william/sauvegardes-suivi/journal.txt
+StandardError=append:/home/william/sauvegardes-suivi/journal.txt

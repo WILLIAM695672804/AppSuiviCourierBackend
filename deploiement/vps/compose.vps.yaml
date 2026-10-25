@@ -1,0 +1,178 @@
+# ---------------------------------------------------------------------
+#  Preproduction sur VPS partage — Netcup VPS 500 ARM G12.5, Debian 13.
+#
+#      docker compose -f compose.vps.yaml up -d
+#
+#  Il attend cette arborescence, que `2-preparer-paquet.sh` assemble et
+#  que `3-installer.sh` depose dans /root/suivicourier/ :
+#
+#      suivicourier/
+#      |- compose.vps.yaml      ce fichier
+#      |- .env                  droits 600, jamais suivi par Git
+#      |- backend/              contexte de construction de l'application
+#      |- front/
+#      |  |- Dockerfile.front
+#      |  |- dist/              bundle Vite bati sur le poste de travail
+#      |  `- nginx.conf
+#      |- base.dump             a restaurer une seule fois
+#      `- controle.txt          les comptages a retrouver apres restauration
+#
+#  Trois ecarts avec `compose.preprod.yaml`, et trois seulement :
+#
+#   1. AUCUN port publie. Le frontal Caddy de la machine detient 80 et
+#      443 ; `ufw` n'autorise rien d'autre. Un `ports:` ici serait au
+#      mieux inutile, au pire une base de donnees joignable.
+#
+#   2. Deux reseaux. `interne` porte le trafic de la plateforme ; seul
+#      `proxy` rejoint `frontal`, sous l'alias que le `reverse_proxy` du
+#      Caddyfile appelle. La base et le courtier restent donc hors de
+#      portee de l'autre application du VPS, qui partage ce frontal.
+#
+#   3. Les plafonds memoire somment a 2 Gio au lieu de 5,8. La machine
+#      n'a que 3,8 Gio et une premiere application y tourne deja. Voir
+#      `LISEZMOI.md` : ces chiffres se verifient par `1-mesurer.sh`
+#      AVANT le premier demarrage, et s'ajustent si SASI pese plus que
+#      prevu.
+#
+#  AUCUNE interpolation `${...}` dans ce fichier — volontairement. Compose
+#  resout les `${...}` depuis le shell et le `.env` du repertoire, jamais
+#  depuis `env_file`. Tout ce que les services lisent vient de `.env`, par
+#  `env_file`, et rien n'est interpole au chargement.
+# ---------------------------------------------------------------------
+
+name: suivicourier
+
+x-application: &application
+  build:
+    context: ./backend
+    dockerfile: Dockerfile
+  image: suivicourier/application:vps
+  env_file: [.env]
+  environment:
+    DJANGO_SETTINGS_MODULE: config.reglages.preprod
+  volumes:
+    - pieces:/app/media
+  depends_on:
+    base: {condition: service_healthy}
+    file: {condition: service_started}
+  networks: [interne]
+  restart: unless-stopped
+
+services:
+  base:
+    image: postgres:16
+    env_file: [.env]
+    command:
+      - postgres
+      # 112 Mo et non 768 : la machine est partagee avec une TimescaleDB.
+      # PostgreSQL ne reserve pas ces pages, il les prend au fil de
+      # l'usage — mais le noyau, lui, compte le pic, et il tue le plus
+      # gros processus de la machine, qui serait la base de l'autre
+      # application.
+      - -c
+      - shared_buffers=112MB
+      - -c
+      - work_mem=4MB
+      # 20 et non 40 : 2 ouvriers Gunicorn x 3 fils = 6, plus l'ouvrier
+      # Celery et l'horloge, plus une marge pour `psql`. Chaque connexion
+      # inoccupee coute environ 10 Mo ici.
+      - -c
+      - max_connections=20
+      - -c
+      - log_min_duration_statement=1000
+    volumes:
+      - donnees:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U $${POSTGRES_USER}"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+    mem_limit: 448m
+    networks: [interne]
+    restart: unless-stopped
+
+  file:
+    image: redis:7-alpine
+    command: ["redis-server", "--save", "", "--appendonly", "no", "--maxmemory", "64mb", "--maxmemory-policy", "noeviction"]
+    mem_limit: 96m
+    networks: [interne]
+    restart: unless-stopped
+
+  web:
+    <<: *application
+    # 2 ouvriers x 3 fils au lieu de 3 x 4 : six requetes simultanees
+    # suffisent a une recette, et chaque ouvrier Gunicorn charge Django
+    # entier, soit environ 120 Mo.
+    command:
+      - sh
+      - -c
+      - |
+        python manage.py migrate --noinput &&
+        exec gunicorn config.wsgi:application \
+          --bind 0.0.0.0:8000 \
+          --workers 2 --threads 3 --worker-class gthread \
+          --timeout 120 --graceful-timeout 30 \
+          --access-logfile - --error-logfile -
+    mem_limit: 704m
+
+  ouvrier:
+    <<: *application
+    # Concurrence 1 et non 2. Une conversion LibreOffice demande environ
+    # 500 Mo ; deux simultanees en demandent plus que ce VPS n'en a de
+    # libre. Une file qui s'allonge est un desagrement, un `oom-kill` est
+    # une panne.
+    command: ["celery", "-A", "config.celery", "worker", "--loglevel=INFO", "--concurrency=1"]
+    mem_limit: 576m
+    healthcheck:
+      test: ["CMD-SHELL", "celery -A config.celery inspect ping -d celery@$$HOSTNAME || exit 1"]
+      interval: 60s
+      timeout: 15s
+      retries: 3
+      start_period: 60s
+
+  horloge:
+    <<: *application
+    # LA PANNE MUETTE : sans `beat`, les ecrans repondent et seul le temps
+    # cesse de s'ecouler. Les partitions de l'annee suivante ne sont pas
+    # creees, et toute ecriture metier echouera le 1er janvier.
+    command:
+      - celery
+      - -A
+      - config.celery
+      - beat
+      - --loglevel=INFO
+      - --schedule=/etat/celerybeat-schedule
+    volumes:
+      - pieces:/app/media
+      - horloge:/etat
+    mem_limit: 160m
+
+  proxy:
+    # Image construite a partir d'un `dist` deja bati sur le poste de
+    # travail : voir `Dockerfile.front` et `2-preparer-paquet.sh`. Le
+    # bundle Vite ne depend d'aucune architecture, et `npm ci` sur
+    # 2 vCore ARM avec 1 Gio de libre est une loterie.
+    build:
+      context: ./front
+      dockerfile: Dockerfile.front
+    image: suivicourier/front:vps
+    depends_on: [web]
+    mem_limit: 64m
+    # Aucun `ports:`. L'alias est le seul point d'entree, et c'est le nom
+    # que `sites/suivicourier.caddy` donne a son `reverse_proxy`. Le
+    # changer ici sans le changer la-bas rend un 502 de Caddy.
+    networks:
+      interne:
+      frontal:
+        aliases: [suivicourier-proxy]
+    restart: unless-stopped
+
+networks:
+  interne:
+  frontal:
+    external: true
+
+volumes:
+  donnees:
+  pieces:
+  horloge:

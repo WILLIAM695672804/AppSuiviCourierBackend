@@ -1,0 +1,72 @@
+# ---------------------------------------------------------------------
+#  Publication de la plateforme de suivi du Port autonome de Douala.
+#
+#  A deposer dans ~/AppSuivi/sasi-ia/config/proxy/sites/, puis :
+#
+#      docker compose exec caddy caddy reload --config /etc/caddy/Caddyfile
+#
+#  Un rechargement n'interrompt pas l'autre application ; un redemarrage
+#  du frontal, si.
+#
+#  `suivicourier-proxy` est l'alias que `compose.vps.yaml` donne au
+#  service `proxy` sur le reseau `frontal`. Les deux noms doivent rester
+#  identiques : s'ils divergent, Caddy rend un 502 et le journal parle de
+#  resolution DNS, pas de configuration.
+# ---------------------------------------------------------------------
+
+suivicourier.the7ing.site {
+
+	# Le certificat est demande a Let's Encrypt au premier appel du
+	# domaine. Il est range dans le volume `caddy_data`, qu'il ne faut
+	# jamais supprimer : cinq certificats identiques par semaine, pas
+	# plus. Un domaine qui ne resout pas encore consomme un echec, pas
+	# un certificat — mais verifier la resolution avant reste la regle.
+
+	# Nginx, dans le conteneur `proxy`, sert le front et relaie /api vers
+	# Gunicorn. Caddy ne connait donc qu'une seule cible.
+	reverse_proxy suivicourier-proxy:80 {
+
+		# Django tourne en `SECURE_SSL_REDIRECT = True` derriere une
+		# terminaison TLS qui n'est pas la sienne. Il lit
+		# `X-Forwarded-Proto` pour savoir que la requete est arrivee en
+		# HTTPS. Caddy pose cet en-tete de lui-meme — c'est pour cela
+		# qu'il n'y a pas de `header_up` ici.
+		#
+		# SI LE NAVIGATEUR BOUCLE (ERR_TOO_MANY_REDIRECTS), c'est que
+		# cet en-tete n'arrive pas. Decommenter alors la ligne
+		# suivante, qui l'impose :
+		# header_up X-Forwarded-Proto https
+
+		# Le telechargement d'une piece jointe est un flux de 25 Mo au
+		# plus, servi par un ouvrier Gunicorn. Le mettre en tampon
+		# ferait attendre le premier octet jusqu'au dernier.
+		flush_interval -1
+	}
+
+	# Le plafond metier est de 25 Mo par piece
+	# (`pieces.taille_maximale_mo`). La marge couvre l'enveloppe du
+	# formulaire multipart. Au-dela, la requete est coupee ici, et le
+	# deposant ne verra pas le message du service : c'est voulu, un
+	# depot de 100 Mo ne doit pas traverser la machine pour etre refuse
+	# au bout.
+	request_body {
+		max_size 30MB
+	}
+
+	# Pas de directive `encode` : Nginx comprime deja en amont
+	# (`gzip on`), et recomprimer un flux deja comprime coute du
+	# processeur pour rien sur une machine a 2 vCore.
+
+	# Pas d'en-tetes de securite ici non plus : Django pose lui-meme
+	# HSTS, `X-Frame-Options`, `X-Content-Type-Options` et
+	# `Referrer-Policy` (RNF-SEC-01, reglages/preprod.py). Les doubler
+	# produirait des en-tetes en double, que certains navigateurs
+	# refusent d'interpreter.
+
+	log {
+		output file /var/log/caddy/suivicourier.log {
+			roll_size 10MB
+			roll_keep 5
+		}
+	}
+}

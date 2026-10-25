@@ -1,0 +1,125 @@
+# ---------------------------------------------------------------------
+#  Ce projet n'est pas une bibliotheque : c'est une application Django.
+#  Il est neanmoins installe en mode editable (`pip install -e .`) pour
+#  que `noyau`, `config` et les piliers soient importables depuis
+#  n'importe ou — pytest, Celery, les commandes de gestion.
+#
+#  Sans la section `packages.find` ci-dessous, setuptools refuse de
+#  construire : « Multiple top-level packages discovered in a flat-layout ».
+#  L'installation echoue alors entierement, dependances comprises, et
+#  `make installer` ne produit qu'un environnement vide.
+# ---------------------------------------------------------------------
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools.packages.find]
+include = ["noyau*", "config*", "activite*", "courrier*"]
+
+[project]
+name = "suivi-backend"
+version = "0.1.0"
+description = "Plateforme de suivi des courriers et des activites — Port autonome de Douala"
+requires-python = ">=3.12"
+
+dependencies = [
+    "Django>=5.2,<6.0",
+    "django-ninja>=1.3",
+    "psycopg[binary]>=3.2",
+    "celery>=5.4",
+    "redis>=5.2",
+    "django-environ>=0.11",
+    "structlog>=24.4",
+    "gunicorn>=23.0",
+    # Les documents que l'application produit sortent du gabarit Word officiel
+    # de la DSR, jamais d'une capture d'ecran (ADR 023).
+    "python-docx>=1.1",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8.3",
+    "pytest-django>=4.9",
+    "pytest-cov>=6.0",
+    "factory-boy>=3.3",
+    "ruff>=0.8",
+    "mypy>=1.13",
+    "django-stubs>=5.1",
+]
+
+# ---------------------------------------------------------------------
+#  Qualite
+#
+#  La ligne longue est portee a 100 : le nommage est en francais et les
+#  noms metier y sont longs (`avancement_attendu`, `plan_actions_annuel`).
+#  A 88, on passerait le projet a la ligne pour rien.
+# ---------------------------------------------------------------------
+[tool.ruff]
+line-length = 100
+target-version = "py312"
+# `extend-exclude` et non `exclude` : ce dernier REMPLACE la liste par defaut,
+# qui contient `.venv`. Avec `exclude`, un `ruff format` reecrit les milliers
+# de fichiers de l'environnement virtuel et casse l'installation.
+extend-exclude = ["*/migrations/*"]
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B", "DJ", "RUF"]
+ignore = [
+    # RUF001/002/003 signalent les caracteres unicode ambigus. Tout le projet
+    # est redige en francais, apostrophes typographiques comprises.
+    "RUF001",
+    "RUF002",
+    "RUF003",
+    # RUF012 veut un ClassVar sur toute liste de classe. Or `Meta.ordering`,
+    # `choices` et `REQUIRED_FIELDS` sont la forme canonique de Django : suivre
+    # la regle rendrait chaque modele illisible sans rien corriger.
+    "RUF012",
+    # DJ001 deconseille null=True sur un TextField. Le schema est livre et ses
+    # colonnes sont NULL : declarer blank sans null ferait mentir le modele sur
+    # ce que la base contient reellement.
+    "DJ001",
+    # DJ008 exige un __str__ sur chaque modele. Une table de liaison pure
+    # (profil_permission) n'a rien a afficher.
+    "DJ008",
+]
+
+[tool.ruff.lint.isort]
+known-first-party = ["config", "noyau", "activite"]
+
+[tool.mypy]
+python_version = "3.12"
+plugins = ["mypy_django_plugin.main"]
+exclude = ["migrations"]
+
+# Celery et django-environ ne publient pas de marqueur `py.typed`. Les
+# signaler a chaque execution noierait les vraies erreurs, et c'est ce qui
+# fait qu'on cesse de lire la sortie d'un verificateur.
+[[tool.mypy.overrides]]
+module = ["celery.*", "environ.*"]
+ignore_missing_imports = true
+
+[tool.django-stubs]
+django_settings_module = "config.reglages.test"
+
+[tool.pytest.ini_options]
+DJANGO_SETTINGS_MODULE = "config.reglages.test"
+python_files = ["test_*.py"]
+addopts = "--strict-markers"
+# Les onze apps qui portent des tests, dans le meme ordre que la cible
+# `types` du Makefile. Une app absente d'ici n'est jamais testee, et rien ne
+# le signale : `make verifier` sort vert sur une suite qu'il n'a pas lue.
+# Le pilier courrier a vecu une livraison entiere dans cet angle mort.
+# Ajouter l'app ici fait partie de sa creation — voir docs/pieges.md.
+testpaths = [
+    "noyau",
+    "activite",
+    "gouvernance",
+    "courrier",
+    "performance",
+    "exploitation",
+    "pilotage",
+    "dossier",
+    "archivage",
+    "portail",
+    "supervision",
+]
