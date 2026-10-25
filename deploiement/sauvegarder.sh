@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 # ---------------------------------------------------------------------
-#  Sauvegarde de la preproduction : la base ET les pieces jointes.
+#  Sauvegarde de la preproduction : la base, les pieces jointes ET la
+#  documentation qui n'est dans aucun depot Git.
 #
 #  Les deux ensemble, toujours. Les binaires ne sont pas en base : une
 #  sauvegarde de base seule restaure des courriers dont toutes les pieces
@@ -61,6 +62,26 @@ echo "→ pieces jointes"
 compose exec -T web tar -cf - -C /app/media . \
     | gzip > "${DESTINATION}/pieces-${JOUR}.tar.gz"
 
+echo "→ documentation hors depot"
+# ---------------------------------------------------------------------
+#  TROISIEME VOLET, ajoute le 25 octobre 2026.
+#
+#  Les deux depots Git couvrent `backend/` et `frontend/`. `docs/`,
+#  `diagrammes/`, `CLAUDE.md` et `README.md` restent volontairement hors
+#  Git (arbitrage de l'utilisateur) : ils ne sont donc versionnes
+#  nulle part, et le journal de bord, `docs/pieges.md` et
+#  `docs/questions-ouvertes.md` sont la memoire du projet — ce que le
+#  code ne dit pas et que personne ne retrouvera.
+#
+#  Sans ce volet, une panne du disque emporterait cette memoire alors
+#  que le code, lui, survivrait sur GitHub.
+# ---------------------------------------------------------------------
+PROJET="$(cd "${RACINE}/.." && pwd)"
+tar -czf "${DESTINATION}/documentation-${JOUR}.tar.gz" \
+    -C "${PROJET}" \
+    docs diagrammes CLAUDE.md README.md 2>/dev/null \
+    || echo "  (au moins un element est absent — archive partielle)"
+
 # Ecrits par root sous `sudo`, les fichiers seraient illisibles pour la
 # tache cron de l'utilisateur — et pour la recopie hors machine.
 if [ -n "${SUDO_USER:-}" ]; then
@@ -70,6 +91,7 @@ fi
 echo "→ rotation (au-dela de ${RETENTION_JOURS} jours)"
 find "${DESTINATION}" -name 'base-*.dump' -mtime "+${RETENTION_JOURS}" -delete
 find "${DESTINATION}" -name 'pieces-*.tar.gz' -mtime "+${RETENTION_JOURS}" -delete
+find "${DESTINATION}" -name 'documentation-*.tar.gz' -mtime "+${RETENTION_JOURS}" -delete
 
 echo
 echo "Sauvegarde du ${JOUR} :"
