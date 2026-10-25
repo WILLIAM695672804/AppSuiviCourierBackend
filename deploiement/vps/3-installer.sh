@@ -190,11 +190,19 @@ then echo "  nginx sert le front : OK"
 else echo "  nginx sert le front : ECHEC"
 fi
 
-# Django repond-il ? L'en-tete `X-Forwarded-Proto: https` est
-# indispensable : sans lui, `SECURE_SSL_REDIRECT` rend un 301 vers HTTPS
-# et la mesure ne dit plus rien de l'application. Python est dans
-# l'image applicative, et lui sait lire un code de retour.
-code=$($COMPOSE exec -T web python -c 'import urllib.request as u; r=u.Request("http://127.0.0.1:8000/api/docs", headers={"X-Forwarded-Proto":"https"}); print(u.urlopen(r, timeout=10).status)' 2>/dev/null || echo "")
+# Django repond-il ? DEUX en-tetes sont indispensables, et le premier a
+# ete oublie a la premiere redaction :
+#
+#   `Host` — `ALLOWED_HOSTS` ne porte que le domaine public. Une requete
+#   vers 127.0.0.1 arrive avec `Host: 127.0.0.1:8000`, que Django refuse
+#   en 400 `DisallowedHost`. Le test rendait donc ECHEC sur une
+#   installation parfaitement saine, et le refus etait la preuve que la
+#   configuration etait bonne.
+#
+#   `X-Forwarded-Proto` — sans lui, `SECURE_SSL_REDIRECT` rend un 301
+#   vers HTTPS, et la mesure ne dit plus rien de l'application.
+domaine=$(grep '^ALLOWED_HOSTS=' .env | cut -d= -f2 | cut -d, -f1)
+code=$($COMPOSE exec -T web python -c "import urllib.request as u; r=u.Request('http://127.0.0.1:8000/api/docs', headers={'Host':'$domaine','X-Forwarded-Proto':'https'}); print(u.urlopen(r, timeout=10).status)" 2>/dev/null || echo "")
 echo "  django repond : ${code:-ECHEC}   (200 attendu)"
 
 # L'alias est-il joignable depuis le reseau du frontal ? C'est
