@@ -11,6 +11,7 @@ entier — accueil, domaine, pièges, questions ouvertes — est dans
 | [regles/](regles/) | les règles de gestion et leur statut | maintenue |
 | [guides/](guides/) | comment faire les gestes courants | maintenue |
 | [exploitation/](exploitation/runbook.md) | déploiement, sauvegarde, incidents | maintenue |
+| [exploitation/mise-en-ligne.md](exploitation/mise-en-ligne.md) | la mise en ligne sur le VPS, de bout en bout | maintenue |
 | [recette/](recette/) | ce qu'il faut vérifier avant de livrer | maintenue |
 | [tracabilite.md](tracabilite.md) | ce qui est tracé, où, et pourquoi | maintenue |
 
