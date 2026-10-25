@@ -105,10 +105,33 @@ cp "$VPS/3-installer.sh"       "$PAQUET/"
 cp "$VPS/LISEZMOI.md"          "$PAQUET/"
 chmod +x "$PAQUET"/*.sh
 
-# Verification : aucun secret ne doit partir dans le paquet.
+# ---------------------------------------------------------------------
+#  Verification : aucun secret ne doit partir dans le paquet.
+#
+#  Les motifs exigent une VALEUR qui ressemble a un secret, pas un nom de
+#  variable. Premiere redaction, trop large, arretait le script sur
+#  quatre faux positifs : les trois scripts qui citent
+#  `POSTGRES_PASSWORD=` dans une substitution `sed` ou dans leur propre
+#  motif de recherche, et `env.vps.modele`, dont la valeur est
+#  `A_ENGENDRER`. D'ou les classes de caracteres qui excluent `$`, `\`
+#  et `.`, par lesquels commence toute substitution, et la liste
+#  d'exclusion des valeurs de modele.
+#
+#  `-I` ignore les fichiers binaires : `base.dump` en est un, et une
+#  correspondance fortuite dans ses octets n'aurait aucun sens.
+# ---------------------------------------------------------------------
 echo "  recherche de secrets residuels :"
-if grep -rlE "POSTGRES_PASSWORD=.|SECRET_KEY=.{20}|TUNNEL_TOKEN=." \
-    "$PAQUET/backend" 2>/dev/null | head -5; then
+motifs='SECRET_KEY=[A-Za-z0-9_+/=-]{25,}'
+motifs="$motifs|POSTGRES_PASSWORD=[A-Za-z0-9][A-Za-z0-9!@#%^*_+-]{7,}"
+motifs="$motifs|TUNNEL_TOKEN=[A-Za-z0-9]{10,}"
+motifs="$motifs|\bat_[A-Za-z0-9]{12,}"
+motifs="$motifs|BEGIN (RSA |EC )?PRIVATE KEY"
+
+trouve=$(grep -rnIE "$motifs" "$PAQUET" 2>/dev/null \
+    | grep -vE 'A_ENGENDRER|CHANGEZ_MOI|CHANGE_ME|changez|modele|exemple|example|placeholder|developpement-uniquement' \
+    | cut -d: -f1 | sort -u || true)
+if [ -n "$trouve" ]; then
+    echo "$trouve" | sed 's|^|    |'
     echo "  ARRET : un fichier ci-dessus porte un secret."
     exit 1
 fi
